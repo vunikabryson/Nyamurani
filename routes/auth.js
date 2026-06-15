@@ -73,9 +73,15 @@ router.post('/register', async (req, res) => {
     }
 
     const user = db.prepare('SELECT * FROM users WHERE id=?').get(id);
-    const token = makeToken(user);
 
-    // notify admin safely
+    let token = null;
+    try {
+      token = makeToken(user);
+    } catch (err) {
+      console.error('TOKEN ERROR:', err.message);
+      return res.status(500).json({ error: 'Token generation failed' });
+    }
+
     const admin = db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get();
     if (admin) {
       pushNotif(
@@ -88,7 +94,6 @@ router.post('/register', async (req, res) => {
       );
     }
 
-    // SMS (never crash app if SMS fails)
     try {
       await sendSMS(
         phone,
@@ -113,12 +118,12 @@ router.post('/register', async (req, res) => {
 
   } catch (e) {
     console.error('REGISTER ERROR:', e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', detail: e.message });
   }
 });
 
 // ─────────────────────────────
-// LOGIN
+// LOGIN (FIXED SAFE VERSION)
 // ─────────────────────────────
 router.post('/login', async (req, res) => {
   try {
@@ -134,6 +139,10 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    if (!user.password) {
+      return res.status(500).json({ error: 'User password missing in DB' });
+    }
+
     const match = bcrypt.compareSync(password, user.password);
 
     if (!match) {
@@ -144,7 +153,13 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ error: 'Account suspended' });
     }
 
-    const token = makeToken(user);
+    let token;
+    try {
+      token = makeToken(user);
+    } catch (err) {
+      console.error('LOGIN TOKEN ERROR:', err.message);
+      return res.status(500).json({ error: 'Token error' });
+    }
 
     let profile = null;
     if (user.role === 'rider') {
@@ -155,7 +170,7 @@ router.post('/login', async (req, res) => {
 
   } catch (e) {
     console.error('LOGIN ERROR:', e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', detail: e.message });
   }
 });
 
@@ -179,7 +194,7 @@ router.get('/me', auth, (req, res) => {
 
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', detail: e.message });
   }
 });
 
@@ -244,7 +259,7 @@ router.put('/profile', auth, (req, res) => {
 
   } catch (e) {
     console.error('PROFILE UPDATE ERROR:', e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', detail: e.message });
   }
 });
 
@@ -277,18 +292,17 @@ router.put('/password', auth, (req, res) => {
 
   } catch (e) {
     console.error('PASSWORD ERROR:', e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error', detail: e.message });
   }
 });
 
 // ─────────────────────────────
-// PHOTO UPLOAD (RENDER SAFE PATH)
+// PHOTO UPLOAD
 // ─────────────────────────────
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// IMPORTANT: Render-safe directory
 const uploadDir = process.env.UPLOAD_DIR || '/tmp/uploads';
 
 if (!fs.existsSync(uploadDir)) {
@@ -321,7 +335,7 @@ router.post('/photo', auth, upload.single('photo'), (req, res) => {
 
   } catch (e) {
     console.error('UPLOAD ERROR:', e);
-    res.status(500).json({ error: 'Upload failed' });
+    res.status(500).json({ error: 'Upload failed', detail: e.message });
   }
 });
 
