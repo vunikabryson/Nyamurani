@@ -8,24 +8,16 @@ const { auth } = require('../middleware/auth');
 const { sendSMS } = require('../middleware/sms');
 const { safe, makeToken, pushNotif } = require('../middleware/helpers');
 
-// ─────────────────────────────
+// ==========================
 // REGISTER
-// ─────────────────────────────
+// ==========================
 router.post('/register', async (req, res) => {
   try {
     const {
-      name,
-      email,
-      phone,
-      password,
-      role,
-      id_number,
-      bike_model,
-      plate_number,
-      license_number,
-      emergency_name,
-      emergency_phone,
-      contract_signed
+      name, email, phone, password, role,
+      id_number, bike_model, plate_number,
+      license_number, emergency_name,
+      emergency_phone, contract_signed
     } = req.body;
 
     if (!name || !email || !phone || !password || !role) {
@@ -37,7 +29,7 @@ router.post('/register', async (req, res) => {
     }
 
     if (password.length < 6) {
-      return res.status(400).json({ error: 'Password too short (min 6)' });
+      return res.status(400).json({ error: 'Password too short' });
     }
 
     const existing = db.prepare('SELECT id FROM users WHERE email=?').get(email);
@@ -49,8 +41,7 @@ router.post('/register', async (req, res) => {
     const hash = bcrypt.hashSync(password, 12);
 
     db.prepare(`
-      INSERT INTO users
-      (id,name,email,phone,password,role,status,id_number)
+      INSERT INTO users (id,name,email,phone,password,role,status,id_number)
       VALUES (?,?,?,?,?,?,'waiting',?)
     `).run(id, name, email, phone, hash, role, id_number || null);
 
@@ -74,7 +65,7 @@ router.post('/register', async (req, res) => {
 
     const user = db.prepare('SELECT * FROM users WHERE id=?').get(id);
 
-    let token = null;
+    let token;
     try {
       token = makeToken(user);
     } catch (err) {
@@ -84,47 +75,20 @@ router.post('/register', async (req, res) => {
 
     const admin = db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get();
     if (admin) {
-      pushNotif(
-        admin.id,
-        `New ${role} Registration`,
-        `${name} registered`,
-        role === 'rider' ? '🚴' : '👤',
-        'registration',
-        { userId: id }
-      );
-    }
-
-    try {
-      await sendSMS(
-        phone,
-        `Welcome ${name}, your ${role} account is pending approval. Ref: ${id.slice(-6).toUpperCase()}`
-      );
-    } catch (e) {
-      console.error('SMS error:', e.message);
-    }
-
-    const adminPhone = process.env.ADMIN_PHONE || '+265999000000';
-
-    try {
-      await sendSMS(
-        adminPhone,
-        `[NYAMURANI] New ${role}: ${name} | ${phone}`
-      );
-    } catch (e) {
-      console.error('Admin SMS error:', e.message);
+      pushNotif(admin.id, `New ${role}`, `${name} registered`, '👤', 'registration', { userId: id });
     }
 
     res.status(201).json({ token, user: safe(user) });
 
-  } catch (e) {
-    console.error('REGISTER ERROR:', e);
-    res.status(500).json({ error: 'Server error', detail: e.message });
+  } catch (err) {
+    console.error('REGISTER ERROR:', err);
+    res.status(500).json({ error: 'Server error', detail: err.message });
   }
 });
 
-// ─────────────────────────────
-// LOGIN (FIXED SAFE VERSION)
-// ─────────────────────────────
+// ==========================
+// LOGIN (FIXED)
+// ==========================
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -140,7 +104,7 @@ router.post('/login', async (req, res) => {
     }
 
     if (!user.password) {
-      return res.status(500).json({ error: 'User password missing in DB' });
+      return res.status(500).json({ error: 'Corrupt user record (no password)' });
     }
 
     const match = bcrypt.compareSync(password, user.password);
@@ -168,15 +132,15 @@ router.post('/login', async (req, res) => {
 
     res.json({ token, user: safe(user), profile });
 
-  } catch (e) {
-    console.error('LOGIN ERROR:', e);
-    res.status(500).json({ error: 'Server error', detail: e.message });
+  } catch (err) {
+    console.error('LOGIN ERROR:', err);
+    res.status(500).json({ error: 'Server error', detail: err.message });
   }
 });
 
-// ─────────────────────────────
+// ==========================
 // ME
-// ─────────────────────────────
+// ==========================
 router.get('/me', auth, (req, res) => {
   try {
     const user = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
@@ -192,38 +156,31 @@ router.get('/me', auth, (req, res) => {
 
     res.json({ user: safe(user), profile });
 
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Server error', detail: e.message });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error', detail: err.message });
   }
 });
 
-// ─────────────────────────────
+// ==========================
 // UPDATE PROFILE
-// ─────────────────────────────
+// ==========================
 router.put('/profile', auth, (req, res) => {
   try {
     const {
-      name,
-      phone,
-      area,
-      id_number,
-      saved_addresses,
-      bike_model,
-      plate_number,
-      license_number,
-      emergency_name,
-      emergency_phone
+      name, phone, area, id_number,
+      saved_addresses, bike_model,
+      plate_number, license_number,
+      emergency_name, emergency_phone
     } = req.body;
 
     db.prepare(`
-      UPDATE users
-      SET name=COALESCE(?,name),
-          phone=COALESCE(?,phone),
-          area=COALESCE(?,area),
-          id_number=COALESCE(?,id_number),
-          saved_addresses=COALESCE(?,saved_addresses),
-          updated_at=datetime('now')
+      UPDATE users SET
+      name=COALESCE(?,name),
+      phone=COALESCE(?,phone),
+      area=COALESCE(?,area),
+      id_number=COALESCE(?,id_number),
+      saved_addresses=COALESCE(?,saved_addresses),
+      updated_at=datetime('now')
       WHERE id=?
     `).run(
       name || null,
@@ -236,12 +193,12 @@ router.put('/profile', auth, (req, res) => {
 
     if (req.user.role === 'rider') {
       db.prepare(`
-        UPDATE rider_profiles
-        SET bike_model=COALESCE(?,bike_model),
-            plate_number=COALESCE(?,plate_number),
-            license_number=COALESCE(?,license_number),
-            emergency_name=COALESCE(?,emergency_name),
-            emergency_phone=COALESCE(?,emergency_phone)
+        UPDATE rider_profiles SET
+        bike_model=COALESCE(?,bike_model),
+        plate_number=COALESCE(?,plate_number),
+        license_number=COALESCE(?,license_number),
+        emergency_name=COALESCE(?,emergency_name),
+        emergency_phone=COALESCE(?,emergency_phone)
         WHERE user_id=?
       `).run(
         bike_model || null,
@@ -257,15 +214,14 @@ router.put('/profile', auth, (req, res) => {
 
     res.json({ user: safe(updated) });
 
-  } catch (e) {
-    console.error('PROFILE UPDATE ERROR:', e);
-    res.status(500).json({ error: 'Server error', detail: e.message });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error', detail: err.message });
   }
 });
 
-// ─────────────────────────────
+// ==========================
 // PASSWORD CHANGE
-// ─────────────────────────────
+// ==========================
 router.put('/password', auth, (req, res) => {
   try {
     const { old_password, new_password } = req.body;
@@ -284,21 +240,19 @@ router.put('/password', auth, (req, res) => {
 
     const hash = bcrypt.hashSync(new_password, 12);
 
-    db.prepare(`
-      UPDATE users SET password=?, updated_at=datetime('now') WHERE id=?
-    `).run(hash, req.user.id);
+    db.prepare('UPDATE users SET password=?, updated_at=datetime("now") WHERE id=?')
+      .run(hash, req.user.id);
 
     res.json({ message: 'Password updated' });
 
-  } catch (e) {
-    console.error('PASSWORD ERROR:', e);
-    res.status(500).json({ error: 'Server error', detail: e.message });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error', detail: err.message });
   }
 });
 
-// ─────────────────────────────
+// ==========================
 // PHOTO UPLOAD
-// ─────────────────────────────
+// ==========================
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -333,9 +287,8 @@ router.post('/photo', auth, upload.single('photo'), (req, res) => {
 
     res.json({ photo });
 
-  } catch (e) {
-    console.error('UPLOAD ERROR:', e);
-    res.status(500).json({ error: 'Upload failed', detail: e.message });
+  } catch (err) {
+    res.status(500).json({ error: 'Upload failed', detail: err.message });
   }
 });
 
