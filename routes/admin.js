@@ -7,6 +7,202 @@ const { auth, admin } = require('../middleware/auth');
 const { sendSMS } = require('../middleware/sms');
 const { safe, pushNotif, audit } = require('../middleware/helpers');
 
+// ============================
+// PROTECTION MIDDLEWARE
+// ============================
+router.use(auth);
+router.use(admin);
+
+// ============================
+// OVERVIEW DASHBOARD
+// ============================
+router.get('/overview', (req, res) => {
+  try {
+    const result = {
+      totalOrders: db.prepare("SELECT COUNT(*) c FROM orders").get().c || 0,
+      delivered: db.prepare("SELECT COUNT(*) c FROM orders WHERE status='delivered'").get().c || 0,
+      pending: db.prepare("SELECT COUNT(*) c FROM orders WHERE status='pending'").get().c || 0,
+      inTransit: db.prepare("SELECT COUNT(*) c FROM orders WHERE status='in-transit'").get().c || 0,
+      cancelled: db.prepare("SELECT COUNT(*) c FROM orders WHERE status='cancelled'").get().c || 0,
+
+      revenue: db.prepare("SELECT COALESCE(SUM(total_price),0) r FROM orders WHERE status='delivered'").get().r || 0,
+
+      totalRiders: db.prepare("SELECT COUNT(*) c FROM users WHERE role='rider'").get().c || 0,
+      activeRiders: db.prepare("SELECT COUNT(*) c FROM users WHERE role='rider' AND status='active'").get().c || 0,
+      totalClients: db.prepare("SELECT COUNT(*) c FROM users WHERE role='client'").get().c || 0,
+      waitingApproval: db.prepare("SELECT COUNT(*) c FROM users WHERE status='waiting'").get().c || 0,
+
+      recentOrders: db.prepare(`
+        SELECT o.*, c.name AS client_name, r.name AS rider_name
+        FROM orders o
+        LEFT JOIN users c ON o.client_id = c.id
+        LEFT JOIN users r ON o.rider_id = r.id
+        ORDER BY o.created_at DESC
+        LIMIT 6
+      `).all(),
+
+      recentRegs: db.prepare(`
+        SELECT id, name, email, phone, role, status, created_at
+        FROM users
+        WHERE status='waiting'
+        ORDER BY created_at DESC
+        LIMIT 20
+      `).all()
+    };
+
+    res.json(result);
+
+  } catch (err) {
+    console.error('OVERVIEW ERROR:', err);
+    res.status(500).json({ error: 'Overview failed' });
+  }
+});
+
+// ============================
+// USERS LIST
+// ============================
+router.get('/users', (req, res) => {
+  try {
+    const { role, status, limit = 50, offset = 0 } = req.query;
+
+    let query = `
+      SELECT u.*, rp.bike_model, rp.plate_number, rp.rating,
+             rp.deliveries, rp.total_earnings, rp.commission_rate
+      FROM users u
+      LEFT JOIN rider_profiles rp ON u.id = rp.user_id
+      WHERE u.role != 'admin'
+    `;
+
+    const params = [];
+
+    if (role) {
+      query += ' AND u.role=?';
+      params.push(role);
+    }
+
+    if (status) {
+      query += ' AND u.status=?';
+      params.push(status);
+    }
+
+    query += ' ORDER BY u.created_at DESC LIMIT ? OFFSET ?';
+    params.push(Number(limit), Number(offset));
+
+    const users = db.prepare(query).all(...params).map(safe);
+
+    const total = db.prepare(`
+      SELECT COUNT(*) c FROM users WHERE role != 'admin'
+    `).get().c || 0;
+
+    res.json({ users, total });
+
+  } catch (err) {
+    console.error('USERS ERROR:', err);
+    res.status(500).json({ error: 'Users fetch failed' });
+  }
+});
+
+// ============================
+// SINGLE USER
+// ============================
+router.get('/users/:id', (req, res) => {
+  try {
+    const user = db.prepare(`
+      SELECT u.*, rp.*
+      FROM users u
+      LEFT JOIN rider_profiles rp ON u.id = rp.user_id
+      WHERE u.id = ?
+    `).get(req.params.id);
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const stats = db.prepare(`
+      SELECT 
+        COUNT(*) as total_orders,
+        COALESCE(SUM(total_price),0) as total_spent
+      FROM orders
+      WHERE client_id = ? OR rider_id = ?
+    `).get(user.id, user.id);
+
+    res.json({ user: safe(user), stats });
+
+  } catch (err) {
+    console.error('USER FETCH ERROR:', err);
+    res.status(500).json({ error: 'User fetch failed' });
+  }
+});
+
+// ============================
+// APPROVE USER
+// ============================
+router.post('/users/:id/approve', async (req, res) => {
+  try {
+    const user = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.id);
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    db.prepare(`
+      UPDATE users
+      SET status='active', updated_at=datetime('now')
+      WHERE id=?
+    `).run(user.id);
+
+    audit(req.user.id, req.user.name, 'approve_user', user.id, user.name, user.role);
+
+    pushNotif(user.id, 'Account Approved', 'Your account is now active', '✅', 'approval');
+
+    try {
+      await sendSMS(
+        user.phone,
+        `[NYAMURANI] Hello ${user.name}, your account is approved.`
+      );
+    } catch (smsErr) {
+      console.error('SMS ERROR:', smsErr.message);
+    }
+
+    res.json({ message: 'User approved' });
+
+  } catch (err) {
+    console.error('APPROVE ERROR:', err);
+    res.status(500).json({ error: 'Approval failed' });
+  }
+});
+
+// ============================
+// EVENTS (FIXED DATE HANDLING)
+// ============================
+router.get('/events', (req, res) => {
+  try {
+    const since = Number(req.query.since || 0);
+    const sinceDate = new Date(isNaN(since) ? 0 : since).toISOString();
+
+    const events = db.prepare(`
+      SELECT * FROM events
+      WHERE created_at > ?
+      ORDER BY created_at ASC
+      LIMIT 50
+    `).all(sinceDate);
+
+    res.json({
+      events,
+      serverTime: Date.now()
+    });
+
+  } catch (err) {
+    console.error('EVENTS ERROR:', err);
+    res.status(500).json({ error: 'Events failed' });
+  }
+});
+
+module.exports = router;const express = require('express');
+const router = express.Router();
+const { v4: uuidv4 } = require('uuid');
+
+const db = require('../db/connection');
+const { auth, admin } = require('../middleware/auth');
+const { sendSMS } = require('../middleware/sms');
+const { safe, pushNotif, audit } = require('../middleware/helpers');
+
 // ─────────────────────────────
 // SAFE MIDDLEWARE WRAPPER
 // prevents Render crashes if auth/admin throw
